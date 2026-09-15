@@ -7,19 +7,30 @@ dependencies {
         // 是否自动为输出的jar添加 `gtnhVersion` 后缀
         attachManifestVersionToJar = false
     }
-//Write deps here
-    //Placeholder
 
+    // ------------------------------------------------------------------
+    // 主体模组：YesSteveModel-Unofficial (mod id: ysmu)
+    // 布娃娃直接读取 ysmu 的 GeckoLib 模型缓存、骨骼层级与玩家模型 EEP，
+    // 因此这里只需要一个编译期可见的 MCP 名称 dev jar。
+    // 构建方法：在 YesSteveModel-Unofficial 工程执行 `gradlew shadowJar`，
+    // 然后把 build/libs/ysmu-<version>-dev.jar 复制到本工程的 libs/ 下。
+    // ------------------------------------------------------------------
+    compileOnly files("libs/ysmu-5.09.52.417-dev.jar")
+    runtimeOnlyNonPublishable files("libs/ysmu-5.09.52.417-dev.jar")
 
+    // JOML 由 GTNHLib 在运行时提供（ysmu 本身也依赖它），只参与编译。
+    compileOnly("org.joml:joml:1.10.8")
+    devOnlyNonPublishable("com.github.GTNewHorizons:GTNHLib:0.6.40:dev")
 
+    // JBullet 是布娃娃的刚体求解器。它会以重定位后的包名打包进成品 JAR；
+    // 它的 javax.vecmath 依赖由 Minecraft 1.7.10 自带的 vecmath 提供，不再重复打包。
+    shadowImplementation("cz.advel.jbullet:jbullet:20101010-1") { transitive = false }
 
-
-
-
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.joml:joml:1.10.8")
 }
 
 @SuppressWarnings('GrMethodMayBeStatic')
 String gtnhDev(String name, String classifier = "dev") {
     return elytraModpackVersion.gtnh(name, classifier)
 }
-

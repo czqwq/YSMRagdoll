@@ -1,6 +1,9 @@
 // Add any additional repositories for your dependencies here.
 
 repositories { handler ->
+    // JBullet 与 vecmath 只在 Maven Central 上发布。
+    mavenCentral()
+
     exclusiveContent {
         forRepository {
             handler.maven {
