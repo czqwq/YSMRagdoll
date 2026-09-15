@@ -19,6 +19,8 @@ import cpw.mods.fml.common.network.FMLNetworkEvent;
 public final class ClientRagdollEvents {
 
     private static boolean openKeyDown;
+    /** 使用键（默认右键）上一 tick 的状态，用于轮询牵引模式的按下沿。 */
+    private static boolean useKeyDown;
     private static int lastHotbarSlot = -1;
     /**
      * 1.7.10 的 {@code Minecraft.timer} 是 private，模型捕获需要的帧内插值只能从
@@ -42,9 +44,20 @@ public final class ClientRagdollEvents {
         if (event.phase != TickEvent.Phase.END) {
             return;
         }
-        GravityGunController.update(1.0F);
+        // 与 ClientRagdollManager#render 里的那次调用共用同一份每 tick 采样：
+        // 客户端 tick 这一次负责在 PlayerInteractEvent 之后确认“使用键仍然按住”，
+        // 渲染帧那一次负责按帧跟随准星。
         ClientRagdollManager.tick();
         Minecraft minecraft = Minecraft.getMinecraft();
+        // 使用键的上升沿用本模组自己的轮询实现，而不是只依赖可被取消、可被其他模组
+        // 抢先处理的原版交互事件：1.7.10 没有 InputEvent.InteractionKeyMappingTriggered，
+        // 只靠 PlayerInteractEvent 会让“按住右键牵引”在某些交互分支下完全收不到输入。
+        boolean usePressed = GravityGunController.isUseKeyDown();
+        if (usePressed && !useKeyDown && GravityGunController.isArmed()) {
+            GravityGunController.start();
+        }
+        useKeyDown = usePressed;
+        GravityGunController.update(1.0F);
         if (minecraft.thePlayer != null && minecraft.currentScreen == null) {
             handleScroll(minecraft);
         } else {
@@ -127,14 +140,15 @@ public final class ClientRagdollEvents {
     @SubscribeEvent
     public void onDisconnect(FMLNetworkEvent.ClientDisconnectionFromServerEvent event) {
         ClientPerformanceLogger.reset();
-        ClientRagdollManager.clear("客户端断开连接");
+        // 该事件由 Netty 的 IO 线程派发：只登记请求，真正的释放在客户端 tick 完成。
+        ClientRagdollManager.requestClear("客户端断开连接");
     }
 
     @SubscribeEvent
     public void onWorldUnload(WorldEvent.Unload event) {
         if (event.world != null && event.world.isRemote) {
             ClientPerformanceLogger.reset();
-            ClientRagdollManager.clear("客户端世界卸载或切换维度");
+            ClientRagdollManager.requestClear("客户端世界卸载或切换维度");
         }
     }
 }

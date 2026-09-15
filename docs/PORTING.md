@@ -113,6 +113,115 @@ L = T((p.x - t.x)/16, (p.y + t.y)/16, (p.z + t.z)/16)
 9. **设置界面**：用开关按钮代替复选框；滚动区域、可见性裁剪与文本换行自行实现，
    行为（草稿、应用、取消、非法输入提示、“立即保存”开关）保持一致。
 
+## 退出世界时的线程约束（重要）
+
+1.7.10 的 `FMLNetworkEvent.ClientDisconnectionFromServerEvent` 由 **Netty 的 IO 线程** 派发，
+而同一时刻客户端线程正可能在 `ClientPhysicsWorld#simulateFrame` 里步进 JBullet。
+`DbvtBroadphase` + `HashedOverlappingPairCache` 没有任何同步，从另一个线程移除刚体会破坏
+重叠对缓存，随后就在
+
+```text
+HashedOverlappingPairCache.removeOverlappingPair
+  -> last.pProxy0  (NullPointerException)
+```
+
+上抛异常（9 具布娃娃 × 14 刚体的现场最容易命中）。
+
+因此所有“世界之外”的清理入口都只做登记：
+
+| 入口 | 线程 | 处理 |
+| --- | --- | --- |
+| 客户端断开连接 | Netty IO | `ClientRagdollManager#requestClear` |
+| 世界卸载 / 切换维度 | 客户端（防御性） | 同上 |
+| 资源重载 | 客户端 | 直接 `#clear` |
+
+`requestClear` 只递增一个 `AtomicInteger` 并释放牵引约束，真正的 `clear()` 在下一个
+`ClientRagdollManager#tick()`（客户端线程）开头执行；`render()` 在此期间跳过 `simulateFrame`。
+`dispose()` 另外做了隔离：某具布娃娃的刚体移除失败时直接丢弃整个物理世界引用，
+而不是让异常冒泡到事件总线。
+
+## 牵引模式的输入路径
+
+上游 1.20.1 只有 `InputEvent.InteractionKeyMappingTriggered` 一条输入路径。1.7.10 的
+`PlayerInteractEvent` 会被原版方块交互分支与其他模组影响，因此本移植版同时提供：
+
+1. `PlayerInteractEvent`（保留上游行为，并取消原版交互）；
+2. `ClientTickEvent` 里对“使用键”的上升沿轮询。
+
+“使用键是否按住”优先读 `GameSettings.keyBindUseItem`（支持玩家把使用键改绑到键盘），
+再退回 `Mouse.isButtonDown(1)`。
+
+瞄准射线与准星严格同源：
+
+- 眼位：`prevPos + (pos - prevPos) * partialTick`，再按
+  `posY + (getEyeHeight() - getDefaultEyeHeight())` 修正。1.7.10 里
+  `EntityPlayer#posY` 已经把 `yOffset` 算进去了，原版 `getPosition` 也只用这个差值，
+  直接再加一次 `getEyeHeight()` 会把视线抬高一截。
+- 方向：`EntityLivingBase#getLook(partialTick)`（原版 `getMouseOver` 用的同一个方法），
+  使用前归一化，零长度或 NaN 退回 `+Z`。
+- 触及距离：`PlayerControllerMP#getBlockReachDistance()` 与 `MAX_DISTANCE` 的较大者，
+  再按原版方块射线裁剪。
+
+直接用 `player.posX` 会取到上一 tick 的位置，近距离瞄准时会稳定偏出一个身位。
+
+### 眼位绝不能存成 `Vec3`：原版射线会就地改写起点（现场 bug 的根因）
+
+1.7.10 的 `World#rayTraceBlocks` → `func_147447_a` **会就地改写传入的起点向量**：
+它直接对参数 `p_147447_1_` 的 `xCoord/yCoord/zCoord` 做增减，把起点沿射线一路推进到
+命中点，最后才用这个状态构造 `MovingObjectPosition`。
+
+历史上本控制器把 `Aim.eye` 存成 `Vec3` 并直接交给这条射线，于是调用方之后读到的
+“视线起点”其实是**准星打到地面的那个点**：
+
+```
+牵引射线: 起点=(-1424.93, 2.00, -379.63), 终点=(-1424.93, 2.00, -379.63), 长度=0.00
+        玩家位置=(-1424.61, 3.54, -380.70), 视线方向=(-0.16, -0.83, 0.54)
+```
+
+`起点 == 终点 == 地面命中点`，长度为零，JBullet 的 `CollisionWorld#rayTest` 于是把它
+当成一次点查询，永远返回 `hasHit() == false`；方块裁剪也因为“命中点到命中点”的距离为
+零而归零，整条牵引链路必然抓不到任何东西。
+
+修法是让坐标离开可变向量：
+
+- `Aim` 的字段全部是 `double`，`eyeVector()` / `endVector()` 每次调用都新建 `Vec3`；
+- 传给方块射线的 `from`/`to` 是数组副本，原版改什么都没关系；
+- `hit.hitVec` 读出来立刻转成 `double`，不长期持有。
+
+同样的坑在另外两处也已修掉：`ClientRagdollManager#removeLookingAt`（空手右键清除）
+与 `PhysicsRagdoll#isExplosionOccluded`（爆炸遮挡）都曾在射线之后继续使用被改写的起点。
+`GravityGunAimTest#vanillaInPlaceMutationCannotCorruptTheAim` 用一个会就地改写
+`from` 的假 tracer 固定住这条行为。
+
+另外，方块把射线裁剪到 0.5 格以内时（眼睛本身就贴着方块）保留完整触及距离，否则裁剪出来
+的线段又会退化成一次点查询。
+
+### 兜底选取：视线附近最近的肢体
+
+精确射线查询落空时不再直接判负，而是交给
+`ClientPhysicsWorld#selectNearest` 做一次纯几何选取：
+
+1. 对每个肢体的碰撞盒中心求它在视线直线上的投影，得到沿视线的距离 `along` 与垂距
+   `perpendicular`；
+2. 只保留 `0 <= along <= 触及距离` 且 `perpendicular <= 0.9` 的候选；
+3. 取垂距最小者（并列时取更近的），抓取锚点落在该次投影处，并保证不超出碰撞盒外接球。
+
+这条兜底是刻意的偏离：上游要求准星像素级命中，1.7.10 下模型与碰撞盒更容易错开。
+它只改变"选中哪一个肢体"，抓到之后仍然走 `PhysicsRagdoll#grab` 建立同样的点对点约束，
+手感与上游一致。范围上限取三者最小：实际线段长度、方块裁剪后的触及距离
+（`Aim#clippedReach`）、硬上限 12 格，因此隔着方块时不会抓到墙后的尸体。
+
+相关日志有两行：
+
+- `ClientPhysicsWorld#grab` 每次调用打印 `牵引射线:`，包含线段端点与长度、
+  是"精确命中"还是"精确射线未命中"还是"回退到最近肢体(垂距=…)"、选中部位、抓取锚点、
+  刚体数量和 AABB 相交数量；
+- 按下后第一次没抓到时 `GravityGunController` 打印一次 `牵引模式未命中布娃娃:`，
+  额外包含视线方向、线段长度、玩家坐标、眼高修正与偏航/俯仰——线段长度为零（射线退化）、
+  方向为零、玩家坐标非有限值这三种情况都能从这一行直接读出来。
+
+确认现场稳定后可以删除这两行与 `countBodiesNear`、`format(double, double, double)`。
+
 ## 构建期注意事项
 
 - `usesShadowedDependencies = true`：JBullet 必须重定位后打包，否则会与其他携带

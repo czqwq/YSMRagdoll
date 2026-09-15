@@ -198,7 +198,16 @@ public final class PhysicsRagdoll {
             body.setCcdSweptSphereRadius(Math.max(0.02F, smallestHalfExtent * 0.8F));
             // 只参与方块碰撞；布娃娃各刚体之间由关节控制，不再额外互相挤压。
             world.addRagdollBody(body, this);
-            BodyPart bodyPart = new BodyPart(part, body, copy(transform), boneToBody, half);
+            // 碰撞盒中心相对刚体原点的局部偏移：平移取世界差值，再乘初始姿态的
+            // 逆旋转，使刚体随后旋转时仍能得到正确的世界中心。
+            Vector3f centerOffsetLocal = new Vector3f(
+                (float) (center.x - transform.origin.x),
+                (float) (center.y - transform.origin.y),
+                (float) (center.z - transform.origin.z));
+            Matrix3f inverseInitialBasis = new Matrix3f(transform.basis);
+            inverseInitialBasis.invert();
+            inverseInitialBasis.transform(centerOffsetLocal);
+            BodyPart bodyPart = new BodyPart(part, body, copy(transform), boneToBody, half, centerOffsetLocal);
             bodies.put(part.role(), bodyPart);
         }
         List<RigidBody> rigidBodies = new ArrayList<>(bodies.size());
@@ -332,6 +341,106 @@ public final class PhysicsRagdoll {
         BodyPart body = bodies.get(RagdollDefinition.Role.BODY);
         org.joml.Vector3f half = body.halfExtents;
         return Math.max(0.45, Math.sqrt(half.x * half.x + half.y * half.y + half.z * half.z));
+    }
+
+    /**
+     * 每个肢体碰撞盒在世界坐标系中的中心，以及它相对刚体原点的局部偏移。
+     *
+     * <p>
+     * 供牵引模式做"射线附近最近肢体"的兜底选取；偏移量用于把命中点换算回刚体
+     * 局部的抓取锚点，避免再次查询 JBullet 的射线结果。
+     * </p>
+     */
+    public List<PartCenter> partCenters() {
+        List<PartCenter> result = new ArrayList<>(bodies.size());
+        for (BodyPart part : bodies.values()) {
+            Transform transform = part.body.getWorldTransform(new Transform());
+            Vector3f offset = new Vector3f(part.centerOffsetLocal);
+            Matrix3f basis = new Matrix3f(transform.basis);
+            basis.transform(offset);
+            result.add(
+                new PartCenter(
+                    part.body,
+                    part.role(),
+                    transform.origin.x + offset.x,
+                    transform.origin.y + offset.y,
+                    transform.origin.z + offset.z,
+                    offset.x,
+                    offset.y,
+                    offset.z,
+                    part.halfExtents.x,
+                    part.halfExtents.y,
+                    part.halfExtents.z));
+        }
+        return result;
+    }
+
+    /** 一个肢体碰撞盒的中心与局部偏移；局部偏移用于反推抓取锚点。 */
+    public static final class PartCenter {
+
+        private final RigidBody body;
+        private final RagdollDefinition.Role role;
+        private final double x;
+        private final double y;
+        private final double z;
+        private final float offsetX;
+        private final float offsetY;
+        private final float offsetZ;
+        private final float halfX;
+        private final float halfY;
+        private final float halfZ;
+
+        PartCenter(RigidBody body, RagdollDefinition.Role role, double x, double y, double z, float offsetX,
+            float offsetY, float offsetZ, float halfX, float halfY, float halfZ) {
+            this.body = body;
+            this.role = role;
+            this.x = x;
+            this.y = y;
+            this.z = z;
+            this.offsetX = offsetX;
+            this.offsetY = offsetY;
+            this.offsetZ = offsetZ;
+            this.halfX = halfX;
+            this.halfY = halfY;
+            this.halfZ = halfZ;
+        }
+
+        public RigidBody body() {
+            return body;
+        }
+
+        public RagdollDefinition.Role role() {
+            return role;
+        }
+
+        public double x() {
+            return x;
+        }
+
+        public double y() {
+            return y;
+        }
+
+        public double z() {
+            return z;
+        }
+
+        public float offsetX() {
+            return offsetX;
+        }
+
+        public float offsetY() {
+            return offsetY;
+        }
+
+        public float offsetZ() {
+            return offsetZ;
+        }
+
+        /** 计算该碰撞盒在世界空间中的最大半径，用于把抓取锚点限制在盒内。 */
+        public double radius() {
+            return Math.max(0.05D, Math.sqrt(halfX * halfX + halfY * halfY + halfZ * halfZ));
+        }
     }
 
     /**
@@ -643,9 +752,21 @@ public final class PhysicsRagdoll {
         if (level == null || viewer == null || source.squareDistanceTo(target) < 1.0E-6) {
             return false;
         }
-        MovingObjectPosition hit = level.rayTraceBlocks(source, target, false);
-        return hit != null && hit.typeOfHit == MovingObjectPosition.MovingObjectType.BLOCK
-            && hit.hitVec.squareDistanceTo(source) + 0.05 < source.squareDistanceTo(target);
+        // 1.7.10 的 World#rayTraceBlocks 会就地改写传入的起点向量，把它沿射线推到命中点。
+        // 先把要比较的两个量取出来，再用全新向量去查询，否则距离比较会退化成“命中点到命中点”。
+        double sourceX = source.xCoord;
+        double sourceY = source.yCoord;
+        double sourceZ = source.zCoord;
+        double sourceToTarget = source.squareDistanceTo(target);
+        MovingObjectPosition hit = level.rayTraceBlocks(
+            Vec3.createVectorHelper(sourceX, sourceY, sourceZ),
+            Vec3.createVectorHelper(target.xCoord, target.yCoord, target.zCoord),
+            false);
+        if (hit == null || hit.hitVec == null || hit.typeOfHit != MovingObjectPosition.MovingObjectType.BLOCK) {
+            return false;
+        }
+        double hitToSource = hit.hitVec.squareDistanceTo(Vec3.createVectorHelper(sourceX, sourceY, sourceZ));
+        return hitToSource + 0.05 < sourceToTarget;
     }
 
     /** 玩家推动后的短时间内限制向上速度，避免地面接触把水平冲量转换成原地起跳。 */
@@ -847,6 +968,20 @@ public final class PhysicsRagdoll {
             + ','
             + Float.toString(angular.z)
             + ')';
+    }
+
+    /** 诊断用：返回指定刚体在骨架中的部位名，未知时返回 null。 */
+    public String roleNameOf(RigidBody body) {
+        if (body == null) {
+            return null;
+        }
+        for (BodyPart part : bodies.values()) {
+            if (part.body == body) {
+                return part.role()
+                    .name();
+            }
+        }
+        return null;
     }
 
     public void dispose() {
@@ -1099,14 +1234,21 @@ public final class PhysicsRagdoll {
         final Transform initialTransform;
         final Matrix4f boneToBody;
         final org.joml.Vector3f halfExtents;
+        /** 碰撞盒中心相对刚体原点的局部偏移（已按骨骼姿态旋转前的模型空间）。 */
+        final Vector3f centerOffsetLocal;
 
         BodyPart(RagdollDefinition.Part part, RigidBody body, Transform initialTransform, Matrix4f boneToBody,
-            org.joml.Vector3f halfExtents) {
+            org.joml.Vector3f halfExtents, Vector3f centerOffsetLocal) {
             this.part = part;
             this.body = body;
             this.initialTransform = initialTransform;
             this.boneToBody = boneToBody;
             this.halfExtents = halfExtents;
+            this.centerOffsetLocal = centerOffsetLocal;
+        }
+
+        RagdollDefinition.Role role() {
+            return part.role();
         }
     }
 }

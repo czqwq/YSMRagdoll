@@ -8,6 +8,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.RenderHelper;
@@ -52,6 +53,21 @@ public final class ClientRagdollManager {
     private static final long EXPLOSION_REPLAY_WINDOW_MILLIS = 1000L;
     private static ClientPhysicsWorld physicsWorld;
     private static long nextRagdollId = 1;
+    /**
+     * 网络线程不能直接释放布娃娃。
+     *
+     * <p>
+     * 断开连接与维度切换的事件由 Netty 的 IO 线程派发，而同一个 tick 里客户端线程
+     * 正在 {@code ClientPhysicsWorld#simulateFrame} 中步进 JBullet。JBullet 的宽相位
+     * （{@code DbvtBroadphase} + {@code HashedOverlappingPairCache}）没有任何同步，
+     * 在步进期间从另一个线程移除刚体会直接破坏重叠对缓存，随后
+     * {@code HashedOverlappingPairCache#removeOverlappingPair} 会在
+     * {@code last.pProxy0} 上抛 NPE。因此网络线程只登记请求，真正的释放在客户端
+     * tick 的开头执行。
+     * </p>
+     */
+    private static final AtomicInteger PENDING_CLEARS = new AtomicInteger();
+    private static volatile String pendingClearReason;
 
     private ClientRagdollManager() {}
 
@@ -112,8 +128,8 @@ public final class ClientRagdollManager {
         }
     }
 
-    static com.Lilith.ysmragdoll.client.physics.PhysicsGrab grab(Vec3 from, Vec3 to) {
-        return physicsWorld == null ? null : physicsWorld.grab(from, to);
+    static com.Lilith.ysmragdoll.client.physics.PhysicsGrab grab(Vec3 from, Vec3 to, double reach) {
+        return physicsWorld == null ? null : physicsWorld.grab(from, to, reach);
     }
 
     public enum TestSpawnResult {
@@ -260,6 +276,7 @@ public final class ClientRagdollManager {
     }
 
     public static void tick() {
+        processPendingClears();
         processPending();
         long currentTimeMillis = System.currentTimeMillis();
         Iterator<PendingExplosion> explosions = RECENT_EXPLOSIONS.iterator();
@@ -418,6 +435,38 @@ public final class ClientRagdollManager {
         }
     }
 
+    /**
+     * 供网络线程与卸载事件调用的线程安全入口。
+     *
+     * <p>
+     * 只登记请求并立即释放牵引状态（牵引对象本身只是一点约束，不需要触碰宽相位），
+     * 刚体与约束的移除留到客户端线程的 {@code tick()} 开头，避免与正在进行的
+     * JBullet 步进竞争。
+     * </p>
+     */
+    public static void requestClear(String reason) {
+        pendingClearReason = reason;
+        GravityGunController.release();
+        PENDING_CLEARS.incrementAndGet();
+        YsmRagdollLog.info("已排队清理布娃娃（等待客户端线程）: 原因=" + reason);
+    }
+
+    /** 仅用于验证跨线程登记的请求不会丢失。 */
+    static boolean hasPendingClear() {
+        return PENDING_CLEARS.get() > 0;
+    }
+
+    private static void processPendingClears() {
+        // 用 getAndSet 而不是比较后清零：清空期间新到的请求会留下新的计数，
+        // 由下一次 tick 继续处理，不会被丢掉。
+        if (PENDING_CLEARS.getAndSet(0) <= 0) {
+            return;
+        }
+        String reason = pendingClearReason;
+        pendingClearReason = null;
+        clear(reason == null ? "网络线程请求" : reason);
+    }
+
     /** 接收服务端爆炸并立即作用于当前尸体，同时短暂缓存以覆盖爆炸后才完成的死亡快照。 */
     public static void onExplosion(ExplosionImpulseSnapshot snapshot) {
         long expiresAt = System.currentTimeMillis() + EXPLOSION_REPLAY_WINDOW_MILLIS;
@@ -468,7 +517,7 @@ public final class ClientRagdollManager {
             return;
         }
         if (physicsWorld != null && !ACTIVE_PHYSICS.isEmpty()) {
-            if (minecraft.isGamePaused()) {
+            if (minecraft.isGamePaused() || PENDING_CLEARS.get() > 0) {
                 physicsWorld.resetFrameClock();
             } else {
                 physicsWorld.simulateFrame(ACTIVE_PHYSICS);
@@ -583,12 +632,22 @@ public final class ClientRagdollManager {
         if (!YsmRagdollConfig.manualRemoval() || RAGDOLLS.isEmpty()) {
             return false;
         }
-        Vec3 eye = Vec3.createVectorHelper(player.posX, player.posY + player.getEyeHeight(), player.posZ);
+        // 1.7.10 的 World#rayTraceBlocks 会就地改写传入的起点向量（把它沿射线推到命中点），
+        // 所以查询用副本，后面的几何计算继续使用原始眼位。
+        double eyeX = player.posX;
+        double eyeY = player.posY + (player.getEyeHeight() - player.getDefaultEyeHeight());
+        double eyeZ = player.posZ;
         Vec3 look = player.getLook(1.0F);
-        Vec3 end = eye.addVector(look.xCoord * 5.0D, look.yCoord * 5.0D, look.zCoord * 5.0D);
-        MovingObjectPosition blockHit = player.worldObj.rayTraceBlocks(eye, end, false);
-        double maximum = blockHit == null || blockHit.typeOfHit != MovingObjectPosition.MovingObjectType.BLOCK ? 5.0
-            : eye.distanceTo(blockHit.hitVec) + 0.05;
+        MovingObjectPosition blockHit = player.worldObj.rayTraceBlocks(
+            Vec3.createVectorHelper(eyeX, eyeY, eyeZ),
+            Vec3.createVectorHelper(eyeX + look.xCoord * 5.0D, eyeY + look.yCoord * 5.0D, eyeZ + look.zCoord * 5.0D),
+            false);
+        double maximum = 5.0;
+        if (blockHit != null && blockHit.typeOfHit == MovingObjectPosition.MovingObjectType.BLOCK
+            && blockHit.hitVec != null) {
+            maximum = distance(eyeX, eyeY, eyeZ, blockHit.hitVec) + 0.05;
+        }
+        Vec3 eye = Vec3.createVectorHelper(eyeX, eyeY, eyeZ);
 
         StaticRagdoll selected = null;
         double nearest = maximum;
@@ -611,6 +670,13 @@ public final class ClientRagdollManager {
         dispose(selected);
         YsmRagdollLog.info("玩家空手右键清除布娃娃: " + selected.snapshot.playerId());
         return true;
+    }
+
+    private static double distance(double fromX, double fromY, double fromZ, Vec3 to) {
+        double dx = to.xCoord - fromX;
+        double dy = to.yCoord - fromY;
+        double dz = to.zCoord - fromZ;
+        return Math.sqrt(dx * dx + dy * dy + dz * dz);
     }
 
     private static double raySphere(Vec3 eye, Vec3 direction, Vec3 center, double radius) {
@@ -649,11 +715,30 @@ public final class ClientRagdollManager {
 
     private static void dispose(StaticRagdoll ragdoll) {
         if (ragdoll.physics != null) {
-            ACTIVE_PHYSICS.remove(ragdoll.physics);
-            ragdoll.physics.dispose();
+            PhysicsRagdoll physics = ragdoll.physics;
+            // 先从活动列表摘除：即使 JBullet 的移除路径抛出异常（宽相位缓存可能
+            // 已经被先前的失败操作破坏），也不会留下仍被步进的僵尸刚体。
+            ACTIVE_PHYSICS.remove(physics);
             ragdoll.physics = null;
+            try {
+                physics.dispose();
+            } catch (RuntimeException exception) {
+                // 一具布娃娃的清理失败不能阻止其余布娃娃和物理世界被丢弃。
+                YsmRagdollLog.warn("释放 JBullet 刚体失败，已放弃该物理世界: " + exception);
+                discardPhysicsWorld();
+                return;
+            }
         }
         releaseWorldIfUnused();
+    }
+
+    /** 物理世界已经不可信时直接丢弃引用，不再尝试逐个移除刚体。 */
+    private static void discardPhysicsWorld() {
+        ACTIVE_PHYSICS.clear();
+        if (physicsWorld != null) {
+            physicsWorld.clear();
+            physicsWorld = null;
+        }
     }
 
     private static boolean isBelowVoid(StaticRagdoll ragdoll) {

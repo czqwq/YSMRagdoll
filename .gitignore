@@ -12,6 +12,7 @@
 /config/
 /crash-reports/
 /logs/
+/ysm-ragdoll-logs/
 options.txt
 /saves/
 usernamecache.json
