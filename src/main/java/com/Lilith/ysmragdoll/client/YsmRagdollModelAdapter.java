@@ -9,6 +9,8 @@ import net.minecraft.util.ResourceLocation;
 import org.joml.Matrix4f;
 
 import com.Lilith.ysmragdoll.YsmRagdollLog;
+import com.fox.ysmu.client.model.CustomPlayerModel;
+import com.fox.ysmu.data.NPCData;
 import com.fox.ysmu.eep.ExtendedModelInfo;
 import com.fox.ysmu.util.ModelIdUtil;
 
@@ -35,10 +37,6 @@ import software.bernie.geckolib3.resource.GeckoLibCache;
  * </p>
  */
 public final class YsmRagdollModelAdapter {
-
-    private static final String DEFAULT_NAMESPACE = "ysmu";
-    private static final String DEFAULT_MODEL_PATH = "default";
-    private static final String DEFAULT_TEXTURE = "default/default.png";
 
     /** 同一个缺失模型只提示一次，避免有限重试窗口刷屏。 */
     private static final java.util.Set<String> REPORTED_MISSING_MODELS = java.util.Collections
@@ -90,8 +88,7 @@ public final class YsmRagdollModelAdapter {
             return null;
         }
 
-        ResourceLocation modelId = resolveModelId(player);
-        ResourceLocation mainId = ModelIdUtil.getMainId(modelId);
+        ResourceLocation mainId = resolveMainModel(player);
         // 先查缓存再调用 provider.getModel()，否则模型缺失时 getModel 会抛 GeoModelException，
         // 有限重试窗口里会反复打印同一条堆栈。
         GeoModel geoModel = GeckoLibCache.getInstance()
@@ -107,7 +104,7 @@ public final class YsmRagdollModelAdapter {
         com.fox.ysmu.client.entity.CustomPlayerEntity animatable = renderer.getCustomPlayerEntity();
         animatable.setPlayer(player);
         animatable.setMainModel(mainId);
-        animatable.setTexture(resolveTexture(player, modelId));
+        animatable.setTexture(resolveTexture(player));
 
         // 直接运行一次模型动画管线。这一步只写入共享模型对象的骨骼状态，
         // 不产生任何 GL 副作用；随后我们立刻把结果拷贝进独占快照。
@@ -174,19 +171,54 @@ public final class YsmRagdollModelAdapter {
             .scale(widthScale, heightScale, widthScale);
     }
 
-    private static ResourceLocation resolveModelId(EntityPlayer player) {
+    /**
+     * 解析玩家当前应当渲染的主模型，优先级与 ysmu 的
+     * {@code CustomPlayerRenderer#applyEntityModel} 完全一致。
+     *
+     * <p>
+     * 布娃娃必须显出"活人正在渲染的那套模型"，所以这里不能自己再定一套规则。
+     * ysmu 现在把 {@code NPCData} 从 UUID 键改成了实体 id 键，并且**先查实体级覆盖、
+     * 再查玩家 EEP**——同一套覆盖对玩家也生效（{@code EntityModelApi} /
+     * {@code EntityModelRenderApi} 就是给同伴模组写这份覆盖用的）。若仍只读 EEP，
+     * 被覆盖过的玩家会出现"活人是 A 模型、尸体是 B 模型"。
+     * </p>
+     */
+    private static ResourceLocation resolveMainModel(EntityPlayer player) {
+        com.fox.ysmu.data.EntityModelData override = NPCData.getData(player);
         ExtendedModelInfo info = ExtendedModelInfo.get(player);
-        if (info != null && info.getModelId() != null) {
-            return info.getModelId();
-        }
-        return new ResourceLocation(DEFAULT_NAMESPACE, DEFAULT_MODEL_PATH);
+        return chooseMainModel(
+            override == null ? null : override.getModelId(),
+            info == null ? null : info.getModelId());
     }
 
-    private static ResourceLocation resolveTexture(EntityPlayer player, ResourceLocation modelId) {
+    /** 与 {@link #resolveMainModel} 同源的贴图解析，优先级同样对齐 ysmu。 */
+    private static ResourceLocation resolveTexture(EntityPlayer player) {
+        com.fox.ysmu.data.EntityModelData override = NPCData.getData(player);
         ExtendedModelInfo info = ExtendedModelInfo.get(player);
-        if (info != null && info.getSelectTexture() != null) {
-            return info.getSelectTexture();
+        return chooseTexture(
+            override == null ? null : override.getTextureId(),
+            info == null ? null : info.getSelectTexture());
+    }
+
+    /** 实体级覆盖 &gt; 玩家 EEP &gt; ysmu 默认模型；抽成纯函数便于单测锁定优先级。 */
+    static ResourceLocation chooseMainModel(ResourceLocation overrideModel, ResourceLocation eepModel) {
+        if (overrideModel != null) {
+            return ModelIdUtil.getMainId(overrideModel);
         }
-        return new ResourceLocation(DEFAULT_NAMESPACE, DEFAULT_TEXTURE);
+        if (eepModel != null) {
+            return ModelIdUtil.getMainId(eepModel);
+        }
+        return CustomPlayerModel.DEFAULT_MAIN_MODEL;
+    }
+
+    /** 实体级覆盖 &gt; 玩家 EEP &gt; ysmu 默认贴图。 */
+    static ResourceLocation chooseTexture(ResourceLocation overrideTexture, ResourceLocation eepTexture) {
+        if (overrideTexture != null) {
+            return overrideTexture;
+        }
+        if (eepTexture != null) {
+            return eepTexture;
+        }
+        return CustomPlayerModel.DEFAULT_TEXTURE;
     }
 }

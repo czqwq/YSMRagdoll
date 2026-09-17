@@ -61,6 +61,36 @@ ysmu 是 YSM/OpenYSM 在 1.7.10 上的 GeckoLib 移植：
 副作用是布娃娃必须依赖 ysmu 的 GeckoLib 版本；升级 ysmu 后如果
 `AnimatedGeoModel` 的签名变化，需要同步调整 `YsmRagdollModelAdapter`。
 
+### ysmu API 契约（每次改 ysmu 都要重新核对）
+
+本模组用 `compileOnly files("libs/ysmu-<version>-dev.jar")` 依赖 ysmu 的 MCP 名 dev jar，
+**改了 ysmu 源码却没刷新这个 jar** 是最容易踩的坑：jar 停留在旧日期，编译期一切正常，
+运行时行为却按旧 API 走。正确流程是在 ysmu 工程执行 `gradlew shadowJar`，把
+`build/libs/ysmu-<version>-dev.jar` 覆盖到本工程 `libs/` 下，再重新构建。
+
+当前依赖的全部 ysmu 表面：
+
+| 类型 | 成员 |
+| --- | --- |
+| `client.ClientProxy` | `getInstance()` |
+| `client.renderer.CustomPlayerRenderer` | `getGeoModelProvider()`、`getCustomPlayerEntity()`、`getUniqueID(animatable)` |
+| `client.entity.CustomPlayerEntity` | `setPlayer`、`setMainModel`、`setTexture`、`getTexture`、`getWidthScale`、`getHeightScale` |
+| `client.model.CustomPlayerModel` | `DEFAULT_MAIN_MODEL`、`DEFAULT_TEXTURE` |
+| `eep.ExtendedModelInfo` | `get(player)`、`getModelId()`、`getSelectTexture()` |
+| `data.NPCData` | `getData(entity)` → `EntityModelData#getModelId()/getTextureId()` |
+| `util.ModelIdUtil` | `getMainId(id)` |
+| `software.bernie.geckolib3.*` | 随 ysmu dev jar 一起打包（132 个类），签名需与运行时一致 |
+
+**模型/贴图解析必须与 `CustomPlayerRenderer#applyEntityModel` 同序**：
+`NPCData` 实体级覆盖 → 玩家 `ExtendedModelInfo` → ysmu 默认。
+ysmu 把 `NPCData` 从 UUID 键改成实体 id 键之后，这套覆盖对玩家也生效；
+只读 EEP 会让被覆盖的玩家出现"活人是 A 模型、尸体是 B 模型"的错位。
+该优先级由 `RagdollModelResolutionTest` 锁定，改动 `chooseMainModel`/`chooseTexture` 时必须同步。
+
+已知的有意差异：请求的模型在本客户端缺失时，ysmu 的替换渲染器会退回默认模型让实体
+永远可见，而 `capture` 直接放弃捕获并只提示一次。两者都会让尸体与活人不一致，但放弃
+捕获可以避免 `provider.getModel()` 抛 `GeoModelException` 在有限重试窗口里刷屏。
+
 ## 坐标契约（与上游完全一致）
 
 采用列向量，矩阵乘积右侧先作用。模型几何顶点、刚体长度和世界位置使用**方块**单位；
