@@ -9,9 +9,24 @@ dependencies {
     }
 
     // ------------------------------------------------------------------
+    // 共享动画引擎：GeckoLib 3 for 1.7.10（mod id: geckolib）
+    // 引擎已从 ysmu 中剥离为独立模组：FML 1.7.10 只有一个类加载器，两个模组若各自打包
+    // software.bernie.geckolib3 会互相遮蔽，因此本模组改为直接依赖这份共享引擎。
+    // 布娃娃读取它的模型缓存、骨骼层级与几何类型（GeoModel / GeoBone / GeoCube 等）。
+    // 构建方法：在 Geckolib 工程执行 `gradlew shadowJar`，
+    // 然后把 build/libs/geckolib-<version>-dev.jar 复制到本工程的 libs/ 下。
+    // 只使用 dev jar（MCP 名称）编译；玩家侧安装的是 reobf 后的发布版。
+    // Jackson 已在引擎内部重定位到 software.bernie.geckolib3.shadow.*，本模组无需声明。
+    // ------------------------------------------------------------------
+    compileOnly files("libs/geckolib-5.09.52.417-dev.jar")
+    testImplementation files("libs/geckolib-5.09.52.417-dev.jar")
+    runtimeOnlyNonPublishable files("libs/geckolib-5.09.52.417-dev.jar")
+
+    // ------------------------------------------------------------------
     // 主体模组：YesSteveModel-Unofficial (mod id: ysmu)
-    // 布娃娃直接读取 ysmu 的 GeckoLib 模型缓存、骨骼层级与玩家模型 EEP，
-    // 因此这里只需要一个编译期可见的 MCP 名称 dev jar。
+    // 布娃娃读取它的玩家模型 EEP、渲染替换入口与骨骼提取路径。
+    // 自 YSMU phase7 起 ysmu **不再内置** GeckoLib，所以上面的引擎依赖是必需的：
+    // 只装 ysmu 不装 geckolib 的组合既编译不过，运行时也会 NoClassDefFoundError。
     // 构建方法：在 YesSteveModel-Unofficial 工程执行 `gradlew shadowJar`，
     // 然后把 build/libs/ysmu-<version>-dev.jar 复制到本工程的 libs/ 下。
     // ------------------------------------------------------------------

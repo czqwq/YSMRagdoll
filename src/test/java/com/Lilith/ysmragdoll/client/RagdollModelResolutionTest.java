@@ -12,9 +12,15 @@ import org.junit.Test;
  *
  * <p>
  * ysmu 把 {@code NPCData} 从 UUID 键改成实体 id 键之后，这套覆盖对玩家也生效，
- * 而 {@code CustomPlayerRenderer#applyEntityModel} 是先查覆盖、再查 EEP。
- * 本模组旧代码只读 EEP，被覆盖过的玩家会出现"活人是 A 模型、尸体是 B 模型"。
+ * 而 {@code CustomPlayerRenderer#resolveOverride} 是先查覆盖、再查 EEP。
+ * 本模组旧代码只读 EEP，被覆盖过的玩家在<b>死亡当帧</b>会出现"活人是 A 模型、尸体是 B 模型"。
  * 这里把优先级固定成回归用例，防止适配器再退回只读 EEP 的写法。
+ * </p>
+ *
+ * <p>
+ * 设计边界：尸体是死亡瞬间的<b>冻结快照</b>（{@code CapturedModel} 深拷贝骨骼树，并记下
+ * mainId 与贴图），玩家事后更换模型不会改变已生成的尸体。本文件锁定的只是"取哪一套模型
+ * 来冻结"，不是让尸体跟随玩家实时变化。
  * </p>
  *
  * <p>

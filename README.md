@@ -17,6 +17,7 @@
 | Forge | `10.13.4.1614`                                                                                                                      |
 | Java | 编译使用 JDK 17+（Jabel 现代语法，产物为 JVM 8 字节码）                                                                             |
 | 主体模组 | `ysmu`（YesSteveModel-Unofficial），已验证源码版本 `5.09.52.417`，[依赖下载地址](https://github.com/czqwq/YesSteveModel-Unofficial) |
+| 动画引擎 | `geckolib`（GeckoLib 3 for 1.7.10，独立模组），源码版本 `5.09.52.417`，[仓库](https://github.com/czqwq/Geckolib) |
 | 运行时库 | UniMixins、GTNHLib（joml 1.10.8 由 GTNHLib 提供）、`java3d:vecmath:1.3.1`（Minecraft 自带库）                                       |
 | 物理引擎 | JBullet `20101010-1`（重定位后打包进成品 JAR）                                                                                      |
 | Mod ID | `ysmragdoll`                                                                                                                        |
@@ -27,7 +28,7 @@
 ```powershell
 .\gradlew.bat build        # 编译、测试、重定位依赖、重混淆
 .\gradlew.bat test         # 只跑自动化测试
-.\gradlew.bat runClient    # 开发客户端（需要 ysmu 与至少一个玩家模型）
+.\gradlew.bat runClient    # 开发客户端（需要 ysmu、geckolib 与至少一个玩家模型）
 ```
 
 主要产物：
@@ -37,19 +38,27 @@ build/libs/ysmragdoll-<version>.jar        # 发布用（已内含重定位后�
 build/libs/ysmragdoll-<version>-dev.jar    # 开发用
 ```
 
-### 主体模组依赖
+### 上游依赖（两个 MCP 名称的 dev jar）
 
-本工程直接编译 ysmu 的公开 API（GeckoLib 模型缓存、骨骼层级、玩家模型 EEP），
-因此需要一个 **MCP 名称的 ysmu dev jar**：
+本工程直接编译 ysmu 的公开 API（玩家模型 EEP、渲染替换入口）与 GeckoLib 引擎的几何/渲染
+类型，因此需要两个 **MCP 名称的 dev jar**：
 
 ```powershell
 # 在 YesSteveModel-Unofficial 工程目录
 .\gradlew.bat shadowJar
 copy build\libs\ysmu-<version>-dev.jar <本工程>\libs\
+
+# 在 Geckolib 工程目录
+.\gradlew.bat shadowJar
+copy build\libs\geckolib-<version>-dev.jar <本工程>\libs\
 ```
 
-`dependencies.gradle` 中当前引用的是 `libs/ysmu-5.09.52.417-dev.jar`。
-升级 ysmu 后只需要替换该文件并更新依赖坐标中的版本号。
+`dependencies.gradle` 中当前引用的是 `libs/ysmu-5.09.52.417-dev.jar` 与
+`libs/geckolib-5.09.52.417-dev.jar`。升级上游后只需要替换对应文件并更新依赖坐标中的版本号。
+
+> 自 YSMU phase7 起 ysmu **不再内置** GeckoLib 引擎，引擎改由独立的 `geckolib` 模组提供。
+> 两个 jar 必须同时刷新：只刷新其中一个会让编译期与运行时的引擎版本不一致，或者直接
+> 编译失败。详见 `docs/PORTING.md` 的「两个上游 jar 的刷新流程」。
 
 ## 架构
 
@@ -208,4 +217,5 @@ copy build\libs\ysmu-<version>-dev.jar <本工程>\libs\
 本工程代码采用 MIT 许可证，见 `LICENSE`。第三方组件与许可证见
 `THIRD_PARTY_NOTICES.md`。
 
-本工程与发行 JAR 不包含 Minecraft、ysmu 主体模组，也不包含任何玩家模型、纹理或动画资源。
+本工程与发行 JAR 不包含 Minecraft、ysmu 主体模组、GeckoLib 引擎（独立模组 `geckolib`），
+也不包含任何玩家模型、纹理或动画资源。

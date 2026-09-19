@@ -58,15 +58,27 @@ ysmu 是 YSM/OpenYSM 在 1.7.10 上的 GeckoLib 移植：
 因此本移植版改为“直接运行一次动画管线 → 读取骨骼状态 → 深拷贝骨骼树”。
 这同时消除了上游的若干已知问题（`Duplicate delegates`、捕获缓冲、依赖混淆签名）。
 
-副作用是布娃娃必须依赖 ysmu 的 GeckoLib 版本；升级 ysmu 后如果
-`AnimatedGeoModel` 的签名变化，需要同步调整 `YsmRagdollModelAdapter`。
+副作用是布娃娃必须依赖这套 GeckoLib 引擎；升级引擎后如果 `AnimatedGeoModel` 或几何
+类型的签名变化，需要同步调整 `YsmRagdollModelAdapter`。引擎自 YSMU phase7 起已从 ysmu
+剥离为独立模组（mod id `geckolib`），见下面的引擎契约。
 
-### ysmu API 契约（每次改 ysmu 都要重新核对）
+### 两个上游 jar 的刷新流程（改完上游必须做）
 
-本模组用 `compileOnly files("libs/ysmu-<version>-dev.jar")` 依赖 ysmu 的 MCP 名 dev jar，
-**改了 ysmu 源码却没刷新这个 jar** 是最容易踩的坑：jar 停留在旧日期，编译期一切正常，
-运行时行为却按旧 API 走。正确流程是在 ysmu 工程执行 `gradlew shadowJar`，把
-`build/libs/ysmu-<version>-dev.jar` 覆盖到本工程 `libs/` 下，再重新构建。
+本模组用两个 `compileOnly` 的 MCP 名 dev jar 编译：`libs/ysmu-<version>-dev.jar` 与
+`libs/geckolib-<version>-dev.jar`。**改了上游源码却没刷新对应 jar** 是最容易踩的坑：
+jar 停留在旧日期，编译期一切正常，运行时行为却按旧 API 走。
+
+| 仓库 | 产物 | 目标 |
+| --- | --- | --- |
+| YesSteveModel-Unofficial | `build/libs/ysmu-<version>-dev.jar` | `libs/ysmu-<version>-dev.jar` |
+| Geckolib | `build/libs/geckolib-<version>-dev.jar` | `libs/geckolib-<version>-dev.jar` |
+
+两者都要在各自仓库执行 `gradlew shadowJar`，把产物覆盖到本工程 `libs/` 下再重新构建。
+
+YSMU phase7 之后 ysmu **不再内置** GeckoLib（dev jar 从 2.8 MB 降到约 0.8 MB），引擎改由
+独立模组提供，因此 `@Mod` 声明 `required-after:geckolib;after:ysmu`。注意 FML 1.7.10 的
+多个依赖项用**分号**分隔（`Loader.DEPENDENCYSPLITTER = Splitter.on(";")`），写成逗号会因为
+拆不出「指令:目标」两段而抛 `LoaderException`。
 
 当前依赖的全部 ysmu 表面：
 
@@ -79,9 +91,9 @@ ysmu 是 YSM/OpenYSM 在 1.7.10 上的 GeckoLib 移植：
 | `eep.ExtendedModelInfo` | `get(player)`、`getModelId()`、`getSelectTexture()` |
 | `data.NPCData` | `getData(entity)` → `EntityModelData#getModelId()/getTextureId()` |
 | `util.ModelIdUtil` | `getMainId(id)` |
-| `software.bernie.geckolib3.*` | 随 ysmu dev jar 一起打包（132 个类），签名需与运行时一致 |
 
-**模型/贴图解析必须与 `CustomPlayerRenderer#applyEntityModel` 同序**：
+**模型/贴图解析必须与 `CustomPlayerRenderer#resolveOverride` 同序**（该方法由
+`applyEntityModel` 抽出，渲染器与它共用同一份优先级实现）：
 `NPCData` 实体级覆盖 → 玩家 `ExtendedModelInfo` → ysmu 默认。
 ysmu 把 `NPCData` 从 UUID 键改成实体 id 键之后，这套覆盖对玩家也生效；
 只读 EEP 会让被覆盖的玩家出现"活人是 A 模型、尸体是 B 模型"的错位。
@@ -90,6 +102,41 @@ ysmu 把 `NPCData` 从 UUID 键改成实体 id 键之后，这套覆盖对玩家
 已知的有意差异：请求的模型在本客户端缺失时，ysmu 的替换渲染器会退回默认模型让实体
 永远可见，而 `capture` 直接放弃捕获并只提示一次。两者都会让尸体与活人不一致，但放弃
 捕获可以避免 `provider.getModel()` 抛 `GeoModelException` 在有限重试窗口里刷屏。
+
+### geckolib API 契约（每次改引擎都要重新核对）
+
+引擎已独立成模组（mod id `geckolib`，仓库在 `E:\IDEA\Geckolib`），本模组直接引用它的
+几何与渲染类型。当前依赖的全部引擎表面：
+
+| 类型 | 成员 |
+| --- | --- |
+| `geo.render.built.GeoModel` | `topLevelBones` |
+| `geo.render.built.GeoBone` | `childBones`、`childCubes` 与 pivot/rotation/scale 等公开字段 |
+| `geo.render.built.GeoCube` | `quads`、尺寸与 pivot/rotation 字段 |
+| `geo.render.built.GeoQuad` / `GeoVertex` | 顶点位置与 UV（深拷贝用） |
+| `geo.IGeoRenderer` | 由 `RagdollRenderer` 实现 |
+| `model.AnimatedGeoModel` | `getModel(id)`、`setLivingAnimations(animatable, uniqueID, event)` |
+| `model.provider.GeoModelProvider` | `getModel(id)`（经 `CustomPlayerRenderer#getGeoModelProvider()` 取得） |
+| `resource.GeckoLibCache` | `getInstance()`、`getGeoModels()` |
+| `core.event.predicate.AnimationEvent` | 构造参数（animatable / uniqueID / partialTick / extraData） |
+| `model.provider.data.EntityModelData` | 头部朝向与动画状态字段 |
+
+引擎的 dev jar 里 Jackson 已重定位到 `software.bernie.geckolib3.shadow.*`，本模组既不声明
+也不打包 Jackson。dev jar 只放在 `compileOnly` / `testImplementation` /
+`runtimeOnlyNonPublishable` 上，不会进入成品 JAR。
+
+> **duplicate-class 警示**：FML 1.7.10 只有一个类加载器。如果将来 ysmu 又（或仍）打包了
+> `software.bernie.geckolib3`，两个 jar 会互相遮蔽，而两份引擎的 Jackson 重定位前缀
+> 不同（`com.fox.ysmu.shadow.*` vs `software.bernie.geckolib3.shadow.*`），混用会在几何
+> 反序列化路径上炸。刷新 ysmu jar 后可以用下面的命令确认它不再携带引擎：
+
+```powershell
+# 期望输出 0
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$z=[System.IO.Compression.ZipFile]::OpenRead("libs\ysmu-5.09.52.417-dev.jar")
+($z.Entries | Where-Object { $_.FullName -like 'software/bernie/*' }).Count
+$z.Dispose()
+```
 
 ## 坐标契约（与上游完全一致）
 
@@ -258,6 +305,6 @@ HashedOverlappingPairCache.removeOverlappingPair
   JBullet 的模组冲突。重定位前缀由 GTNH 约定给出：`com.Lilith.ysmragdoll.shadow.`。
 - `usesMixins = false`：本模组不使用 Mixin。ysmu 自己声明的 UniMixins 依赖仍然需要安装。
 - `java3d:vecmath` 与 `org.joml` 都**不打包**：前者由 Minecraft 1.7.10 库集合提供，
-  后者由 GTNHLib 提供（ysmu 本身也依赖）。
+  后者由 GTNHLib 提供（引擎与 ysmu 都依赖它）。
 - Spotless 会重排 Java 源码格式；提交前请运行 `gradlew spotlessApply`，
   否则 `build` 会在 `spotlessJavaCheck` 阶段失败。
