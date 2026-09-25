@@ -173,7 +173,7 @@ public final class YsmRagdollModelAdapter {
 
     /**
      * 解析玩家当前应当渲染的主模型，优先级与 ysmu 的
-     * {@code CustomPlayerRenderer#applyEntityModel} 完全一致。
+     * {@code CustomPlayerRenderer#resolveOverride} 完全一致。
      *
      * <p>
      * 布娃娃必须显出"活人正在渲染的那套模型"，所以这里不能自己再定一套规则。

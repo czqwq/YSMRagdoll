@@ -23,7 +23,9 @@ import cpw.mods.fml.common.event.FMLServerStartingEvent;
     version = Tags.VERSION,
     name = "YSM Ragdoll",
     acceptedMinecraftVersions = "[1.7.10]",
-    dependencies = "after:ysmu")
+    // geckolib 是硬依赖：引擎已从 ysmu 剥离为独立模组，本模组直接引用它的几何与渲染类型。
+    // FML 1.7.10 的多依赖分隔符是分号（写成逗号会抛 LoaderException）。
+    dependencies = "required-after:geckolib;after:ysmu")
 public class ysmragdoll {
 
     public static final String MODID = "ysmragdoll";
